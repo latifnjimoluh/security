@@ -1,0 +1,277 @@
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+CHAPITRE 3 — PARE-FEU LINUX : IPTABLES & 
+NFTABLES 
+Volume : 3h CM + 2h TP | Niveau : Avancé 
+3.1 Netfilter et iptables : Architecture et Concepts Fondamentaux 
+3.1.1 Tables, chaînes et règles : comprendre le modèle iptables 
+Iptables est l'interface en espace utilisateur du framework Netfilter du noyau Linux. 
+Son modèle est organisé en trois niveaux hiérarchiques : les tables, les chaînes et les 
+règles. Les tables définissent le type de traitement appliqué aux paquets : la table filter 
+(filtrage standard — accepter, rejeter, dropper), la table nat (translation d'adresses — 
+SNAT, DNAT, MASQUERADE), la table mangle (modification des en-têtes IP — TTL, 
+TOS, marquage), et la table raw (traitement avant le suivi de connexion). Chaque table 
+contient un ensemble de chaînes prédéfinies correspondant aux hooks Netfilter : 
+PREROUTING, INPUT, FORWARD, OUTPUT, POSTROUTING. À chaque chaîne, 
+l'administrateur ajoute des règles qui seront évaluées séquentiellement pour chaque 
+paquet correspondant aux critères définis. 
+La maîtrise d'iptables est un savoir-faire fondamental pour tout architecte sécurité 
+Linux.  
+La syntaxe d'une règle iptables suit un modèle précis : iptables -t TABLE -A 
+CHAINE CRITERES -j CIBLE.  
+Les critères peuvent porter sur l'interface source/destination (-i/-o), les adresses IP 
+source/destination (-s/-d), le protocole (-p), les ports source/destination (--sport/--dport), 
+l'état de la connexion (--state via le module conntrack), ou des modules avancés 
+(multiport, iprange, recent, limit, hashlimit, ipset). La cible (-j) peut être ACCEPT, DROP, 
+REJECT (avec message ICMP), LOG (journalisation), ou une chaîne utilisateur 
+personnalisée. La subtilité est que les règles sont évaluées dans l'ordre : la première règle 
+qui correspond s'applique. L'ordre des règles est donc critique pour la sécurité et les 
+performances. 
+ARCHITECTURE NETFILTER — Flux de Paquets 
+Paquet ENTRANT : 
+NIC → PREROUTING (raw, mangle, nat:DNAT) → Décision Routage 
+→ Si destiné à l'hôte local : INPUT (mangle, filter) → Process Local 
+Campus Yaoundé — 2024/2025 | Page   
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+→ Si à forwarder : FORWARD (mangle, filter) → POSTROUTING (mangle, nat:SNAT) → NIC 
+Paquet SORTANT (généré localement) : 
+Process Local → OUTPUT (raw, mangle, nat:DNAT, filter) → POSTROUTING (mangle, 
+nat:SNAT) → NIC 
+Résumé des Tables par Chaîne : 
+PREROUTING : raw → mangle → nat 
+INPUT      : mangle → filter 
+FORWARD    : mangle → filter 
+OUTPUT     : raw → mangle → nat → filter 
+POSTROUTING: mangle → nat 
+3.1.2 Stateful Firewall : le suivi de connexion (conntrack) 
+Le suivi de connexion (Connection Tracking, conntrack) est la fonctionnalité qui 
+transforme iptables en pare-feu stateful, c'est-à-dire capable de distinguer les paquets en 
+fonction de l'état de la connexion à laquelle ils appartiennent. Sans conntrack, iptables ne 
+verrait que des paquets individuels, sans contexte de session. Avec conntrack, il est 
+possible d'écrire des règles qui autorisent uniquement les paquets appartenant à des 
+connexions établies ou reliées (ESTABLISHED, RELATED), bloquant ainsi tous les 
+paquets non sollicités. Conntrack maintient une table d'état en mémoire (visible via 
+conntrack -L) qui liste toutes les connexions actives avec leur état (NEW, ESTABLISHED, 
+RELATED, INVALID), leurs adresses IP source/destination et leurs ports. 
+L'utilisation correcte du module conntrack est essentielle pour des performances 
+optimales du pare-feu en production. Plutôt que d'écrire des règles séparées pour chaque 
+sens de communication (règle pour le paquet aller, règle pour le paquet retour), conntrack 
+permet d'écrire une seule règle autorisant le trafic établi/relié, ce qui est à la fois plus 
+simple et plus sécurisé. En production, la taille maximale de la table conntrack 
+(nf_conntrack_max) doit être dimensionnée correctement selon le volume de connexions 
+simultanées attendu — une table conntrack pleine provoque des problèmes de 
+connectivité majeurs. Sur un pare-feu d'entreprise gérant 10 000 utilisateurs simultanés, 
+nf_conntrack_max doit être configuré à au moins 500 000 entrées. 
+SCRIPT PARE-FEU IPTABLES PROFESSIONNEL 
+Campus Yaoundé — 2024/2025 | Page   
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+Campus Yaoundé — 2024/2025 | Page   
+#!/bin/bash 
+# Pare-feu type entreprise — Linux Gateway 
+ 
+IPT=/sbin/iptables 
+LAN_IF=eth1     # Interface LAN interne 
+WAN_IF=eth0     # Interface WAN (Internet) 
+DMZ_IF=eth2     # Interface DMZ 
+LAN_NET=192.168.0.0/16 
+DMZ_NET=10.0.1.0/24 
+ 
+# 1. Flush des règles existantes 
+$IPT -F && $IPT -X && $IPT -Z 
+$IPT -t nat -F && $IPT -t mangle -F 
+ 
+# 2. Politique par défaut : tout bloquer 
+$IPT -P INPUT DROP 
+$IPT -P FORWARD DROP 
+$IPT -P OUTPUT ACCEPT 
+ 
+# 3. Loopback 
+$IPT -A INPUT -i lo -j ACCEPT 
+$IPT -A OUTPUT -o lo -j ACCEPT 
+ 
+# 4. Trafic établi/relié 
+$IPT -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 
+$IPT -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 
+ 
+# 5. ICMP limité (anti-flood) 
+$IPT -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 5 -j ACCEPT 
+ 
+# 6. SSH depuis réseau admin uniquement 
+$IPT -A INPUT -i $LAN_IF -s 192.168.100.0/24 -p tcp --dport 22 -j ACCEPT 
+ 
+# 7. LAN → Internet (NAT) 
+$IPT -A FORWARD -i $LAN_IF -o $WAN_IF -m conntrack --ctstate NEW -j ACCEPT 
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+$IPT -t nat -A POSTROUTING -o $WAN_IF -s $LAN_NET -j MASQUERADE 
+# 8. Internet → DMZ Web (ports 80, 443) 
+$IPT -A FORWARD -i $WAN_IF -o $DMZ_IF -d 10.0.1.10 -p tcp -m multiport --dports 80,443 -j 
+ACCEPT 
+$IPT -t nat -A PREROUTING -i $WAN_IF -p tcp -m multiport --dports 80,443 -j DNAT --to
+destination 10.0.1.10 
+# 9. LOG et DROP final 
+$IPT -A INPUT -j LOG --log-prefix '[FW-DROP-IN] ' --log-level 4 
+$IPT -A FORWARD -j LOG --log-prefix '[FW-DROP-FWD] ' --log-level 4 
+3.2 nftables : Le Successeur Moderne d'iptables 
+3.2.1 Architecture et avantages de nftables 
+nftables est le framework de filtrage de nouvelle génération qui succède à iptables 
+dans le noyau Linux (disponible depuis le noyau 3.13, activé par défaut dans Debian 10+ 
+et Ubuntu 20.04+). Il unifie en un seul outil les fonctionnalités qui étaient dispersées dans 
+iptables (IPv4), ip6tables (IPv6), arptables (ARP) et ebtables (Ethernet). nftables apporte 
+plusieurs améliorations fondamentales : une syntaxe plus expressive et plus lisible, la 
+gestion native des ensembles (sets) permettant de regrouper des adresses IP ou des 
+ports dans une seule structure de données indexée (remplaçant avantageusement ipset), 
+l'évaluation des règles en bytecode optimisé pour les performances, et la possibilité de 
+définir des tables et des chaînes entièrement personnalisées sans se contraindre aux 
+tables prédéfinies d'iptables. 
+La migration de iptables vers nftables est en cours dans la quasi-totalité des 
+distributions Linux modernes. En entreprise, cette migration doit être planifiée avec soin : 
+les règles iptables existantes peuvent être converties semi-automatiquement avec l'outil 
+iptables-translate, mais une révision manuelle est nécessaire pour s'assurer que la 
+sémantique est correctement préservée, notamment pour les règles utilisant des modules 
+avancés (recent, hashlimit, ipset) dont certains n'ont pas d'équivalent direct dans nftables. 
+Sur les nouvelles installations, il est recommandé d'utiliser directement nftables, en 
+adoptant sa syntaxe native qui offre une meilleure lisibilité et maintenabilité des politiques 
+de sécurité. 
+Campus Yaoundé — 2024/2025 | Page   
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+Campus Yaoundé — 2024/2025 | Page   
+ 
+CONFIGURATION nftables — Politique Entreprise 
+#!/usr/sbin/nft -f 
+# /etc/nftables.conf — Politique sécurité entreprise 
+ 
+flush ruleset 
+ 
+table inet firewall { 
+ 
+  # Ensembles réutilisables 
+  set admin_ips { type ipv4_addr; elements = { 192.168.100.0/24 } } 
+  set blocked_ips { type ipv4_addr; flags dynamic, timeout; timeout 3600s; } 
+ 
+  chain input { 
+    type filter hook input priority 0; policy drop; 
+ 
+    iif lo accept 
+    ct state established,related accept 
+    ct state invalid drop 
+ 
+    # ICMP limité 
+    ip protocol icmp icmp type echo-request limit rate 5/second accept 
+ 
+    # SSH uniquement depuis admin 
+    ip saddr @admin_ips tcp dport 22 accept 
+ 
+    # Blocklist dynamique 
+    ip saddr @blocked_ips drop 
+ 
+    # Log et drop 
+    log prefix "[nft-drop] " level warn 
+  } 
+ 
+  chain forward { 
+    type filter hook forward priority 0; policy drop; 
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+ct state established,related accept 
+# Règles forward spécifiques... 
+} 
+chain output { 
+type filter hook output priority 0; policy accept; 
+} 
+} 
+3.2.2 Techniques Avancées : Rate Limiting, IP Sets et Protection DDoS 
+La protection contre les attaques par déni de service (DoS/DDoS) est une 
+fonctionnalité critique du pare-feu Linux en environnement de production. iptables/nftables 
+offrent plusieurs mécanismes de rate limiting permettant de limiter le taux de paquets 
+acceptés : le module limit (limite globale), le module hashlimit (limite par source IP — 
+indispensable pour le protection anti-DDoS), et les ensembles dynamiques de nftables 
+avec timeout. Ces mécanismes permettent de détecter et bloquer automatiquement les 
+sources qui génèrent un volume anormal de connexions (SYN flood, UDP flood, ICMP 
+flood), tout en laissant passer le trafic légitime. La protection SYN cookies (sysctl 
+net.ipv4.tcp_syncookies=1) complète ce dispositif en permettant au serveur de continuer à 
+accepter des connexions même lors d'un SYN flood. 
+Les IP sets (ipset sous iptables, sets sous nftables) permettent de gérer des listes 
+dynamiques d'adresses IP, de réseaux ou de ports avec des performances bien 
+supérieures aux listes de règles individuelles. En pratique, les IP sets sont utilisés pour 
+maintenir des listes noires (blacklists) d'adresses connues malveillantes (alimentées par 
+des feeds de threat intelligence), des listes blanches (whitelists) d'adresses de confiance, 
+et des listes dynamiques alimentées automatiquement par des mécanismes de détection 
+comportementale (ex : bloquer automatiquement toute adresse qui tente plus de 10 
+connexions SSH en 60 secondes). Cette approche dynamique et automatisée du blocage 
+est indispensable pour faire face à la volumétrie des menaces modernes dans les SOC 
+d'entreprise. 
+Campus Yaoundé — 2024/2025 | Page   
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+Technique 
+Commande / Module 
+Usage 
+SYN Cookies sysctl tcp_syncookies=1 
+Protection SYN flood 
+Rate Limit global 
+iptables -m limit 
+Anti-ICMP flood, anti-portscan 
+Rate Limit par IP iptables -m hashlimit 
+Anti-brute force, anti-DDoS 
+IP Blacklist dyn. 
+ipset + iptables / nft sets 
+Blocage automatique sources 
+hostiles 
+Recent module iptables -m recent 
+Blocage port knocking inversé 
+Connlimit 
+iptables -m connlimit 
+Limite connexions simultanées/IP 
+TP 3 — Configuration d'un Pare-feu Linux Multi-Zones  
+INFORMATIONS TP 
+Durée : 2 heures | Individuel 
+Environnement : 4 VMs (Firewall Linux + LAN-PC + DMZ-Serveur + Attaquant) 
+Objectif : Implémenter une politique de pare-feu complète avec nftables 
+Livrable : Script nftables fonctionnel + rapport de test 
+Contexte : Orange Cameroun — Portail Client 
+Orange Cameroun déploie un nouveau portail client web. Votre mission est de 
+configurer le pare-feu Linux (3 interfaces) selon l'architecture suivante : WAN (Internet), 
+LAN (réseau interne employés 192.168.50.0/24) et DMZ (serveur web 10.0.5.10). Les 
+exigences de sécurité sont :  
+(1) Le serveur web DMZ doit être accessible depuis Internet sur les ports 80 et 443 
+uniquement.  
+(2) Les employés LAN doivent pouvoir naviguer sur Internet (HTTP/HTTPS) et 
+accéder au serveur DMZ.  
+(3) Personne depuis Internet ne doit accéder directement au LAN.  
+(4) Le pare-feu lui-même n'est administrable que depuis le LAN sur le port 22.  
+(5) Implémenter une protection brute-force SSH. 
+Campus Yaoundé — 2024/2025 | Page   
+Keyce Informatique & IA — Sécurité des Architectures Filaires — Master I Cyber Sécurité 
+Campus Yaoundé — 2024/2025 | Page   
+CORRIGÉ TP 3 — Script nftables Complet 
+SOLUTION COMPLÈTE nftables 
+#!/usr/sbin/nft -f 
+flush ruleset 
+ 
+define WAN = eth0 
+define LAN = eth1 
+define DMZ = eth2 
+define LAN_NET = 192.168.50.0/24 
+define DMZ_WEB = 10.0.5.10 
+ 
+table inet firewall { 
+  set brute_force { type ipv4_addr; flags dynamic, timeout; timeout 600s; } 
+ 
+  chain input { 
+    type filter hook input priority 0; policy drop; 
+    iif lo accept 
+    ct state established,related accept 
+    ct state invalid drop 
+    ip protocol icmp limit rate 2/second accept 
+    # SSH depuis LAN uniquement + anti brute force 
+    iif $LAN ip saddr $LAN_NET tcp dport 22 ct state new \ 
+      add @brute_force { ip saddr ct count over 3 } drop 
+    iif $LAN ip saddr $LAN_NET tcp dport 22 ip saddr != @brute_force accept 
+  } 
+ 
+  chain forward { 
+    type filter hook forward priority 0; policy drop; 
+    ct state established,related accept 
+    # LAN → Internet 
+    iif $LAN oif $WAN ip saddr $LAN_NET accept 
+    # LAN → DMZ Web 
+    iif $LAN oif $DMZ ip daddr $DMZ_WEB tcp dport { 80, 443 } accept 
+    # Internet → DMZ Web 
+    iif $WAN oif $DMZ ip daddr $DMZ_WEB tcp dport { 80, 443 } ct state new accept 
